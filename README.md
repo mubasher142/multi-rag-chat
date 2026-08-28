@@ -1,265 +1,118 @@
-# 🚀 Multi-RAG-Chat
+# MultiPDFChat
 
-Persistent multi-document RAG (Retrieval-Augmented Generation) application with streaming AI responses, source-grounded retrieval, live PDF preview, reranking, and intelligent document interaction using FastAPI, React, Ollama, and LangChain.
+Persistent multi-document RAG (Retrieval-Augmented Generation) with streaming AI responses, source-grounded retrieval, live PDF preview, and intelligent document interaction.
 
----
-
-## ✨ Features
-
-### 📄 Multi-PDF Document Chat
-
-* Upload and chat with multiple PDFs simultaneously
-* Persistent vector storage using FAISS
-* Automatic document chunking and indexing
-
-### 🧠 Intelligent Retrieval Pipeline
-
-* Semantic vector search
-* Similarity score filtering
-* Lightweight reranking
-* Dynamic retrieval depth
-* Keyword-aware retrieval boosting
-
-### 💬 Streaming AI Responses
-
-* Real-time streaming answers
-* Smooth conversational experience
-* Normal chat fallback mode
-
-### 🔍 Source-Grounded Answers
-
-* Source citations with page references
-* Clickable source cards
-* Relevant passage previews
-* Evidence-based retrieval
-
-### 📑 Live PDF Preview
-
-* Open PDF directly from source references
-* Automatic page navigation
-* In-app document preview experience
-
-### 💾 Persistent Vector Database
-
-* FAISS vector persistence
-* Backend restart recovery
-* Proper vector lifecycle management
-* Reset/delete support
-
-### ⚡ Hybrid AI Architecture
-
-* Ollama local inference support
-* Gemini integration support
-* Multi-model architecture ready
-* Future LangGraph orchestration ready
+![React](https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)
+![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Ollama](https://img.shields.io/badge/Ollama-000000?style=for-the-badge)
 
 ---
 
-# 🏗️ System Architecture
-
-```text
-User Query
-    ↓
-Query Routing
-    ↓
-Vector Retrieval (FAISS)
-    ↓
-Similarity Filtering
-    ↓
-Keyword Reranking
-    ↓
-Context Construction
-    ↓
-LLM Generation (Ollama/Gemini)
-    ↓
-Streaming Response
-    ↓
-Source Grounding + PDF Preview
-```
+## Architecture
+User Query → Query Routing → Vector Retrieval (FAISS)
+→ Similarity Filtering → Keyword Reranking
+→ Context Construction → LLM Generation (Ollama/Gemini)
+→ Streaming Response → Source Grounding + PDF Preview
+plain
 
 ---
 
-# 🛠️ Tech Stack
+## Features
 
-## Frontend
-
-* React
-* TypeScript
-* TailwindCSS
-* Vite
-
-## Backend
-
-* FastAPI
-* LangChain
-* FAISS
-* Ollama
-* Gemini API
-* PyPDF
-
-## AI / Retrieval
-
-* Retrieval-Augmented Generation (RAG)
-* Semantic Search
-* Lightweight Reranking
-* Dynamic Retrieval Depth
-* Persistent Vector Embeddings
+- **Multi-PDF Document Chat** — Upload and chat with multiple PDFs simultaneously
+- **Persistent Vector Storage** — FAISS with automatic chunking and indexing
+- **Intelligent Retrieval Pipeline** — Semantic search + similarity filtering + lightweight reranking + dynamic retrieval depth
+- **Streaming AI Responses** — Real-time token streaming for smooth UX
+- **Source-Grounded Answers** — Clickable citations with page references and passage previews
+- **Live PDF Preview** — Jump directly to referenced pages from source cards
+- **Dual AI Architecture** — Ollama (local/offline) and Gemini (cloud) support
+- **Normal Chat Fallback** — Graceful degradation when no documents are uploaded
+- **Health Check Endpoint** — Monitor backend, Ollama, and vector store status
 
 ---
 
-# 📸 Screenshots
+## Tech Stack
 
-## Chat Interface
-
-![Chat UI](./screenshots/Screenshot%202026-05-12%20111922.png)
-
-## PDF Source Preview
-
-![PDF Preview](./screenshots/Screenshot%202026-05-12%20112313.png)
-
-## Source Grounding
-
-![Sources](./screenshots/Screenshot%202026-05-12%20112348.png)
+| Layer | Tech |
+|-------|------|
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS |
+| Backend | FastAPI, LangChain, PyPDF |
+| Embeddings | HuggingFace `all-MiniLM-L6-v2` |
+| Vector DB | FAISS (persistent) |
+| LLM | Ollama (Phi3) / Google Gemini |
 
 ---
 
-# ⚙️ Installation
+## Quick Start
 
-## 1️⃣ Clone Repository
+### Prerequisites
 
-```bash
-git clone https://github.com/mubasher142/multi-rag-chat.git
-cd multi-rag-chat
-```
+- Python 3.10+
+- Node.js 18+
+- [Ollama](https://ollama.com/) installed and running
 
----
-
-## 2️⃣ Backend Setup
+### Backend
 
 ```bash
 cd backend
 
+# Create virtual environment
 python -m venv venv
 
-# Windows
+# Activate (Windows)
 venv\Scripts\activate
 
+# Install dependencies
 pip install -r requirements.txt
-```
 
-Run backend:
-
-```bash
-uvicorn api:app --reload
-```
-
----
-
-## 3️⃣ Frontend Setup
-
-```bash
+# Start server
+python -m uvicorn api:app --reload --host 0.0.0.0 --port 8000
+Frontend
+bash
 cd frontend
 
+# Install dependencies
 npm install
+
+# Start dev server
 npm run dev
-```
+Environment
+bash
+cp .env.example .env
+# Add your GOOGLE_API_KEY (optional — Ollama works fully offline)
+Project Structure
+plain
+backend/
+  api.py           # FastAPI endpoints (upload, chat, reset, health)
+  utils.py         # PDF loading, chunking, vector store, LLM routing
+  requirements.txt # Python dependencies
 
----
+frontend/
+  src/
+    App.tsx        # Main chat interface
+  index.html
+  package.json
+  vite.config.ts
 
-# 🚀 Usage
-
-## Upload PDFs
-
-* Upload one or multiple PDF documents
-* Documents are automatically chunked and indexed
-
-## Ask Questions
-
-* Query uploaded documents naturally
-* Receive grounded AI responses with citations
-
-## View Sources
-
-* Click source cards
-* Open live PDF preview
-* Jump directly to referenced page
-
----
-
-# 🧠 Retrieval Engineering Improvements
-
-This project includes several advanced RAG optimizations:
-
-* Similarity score filtering
-* Lightweight reranking
-* Dynamic top-k retrieval
-* Keyword overlap boosting
-* Source-grounded answer generation
-* Context relevance filtering
-
----
-
-# 📂 Project Structure
-
-```text
-multi-rag-chat/
-│
-├── frontend/
-│   ├── src/
-│   └── ...
-│
-├── backend/
-│   ├── api.py
-│   ├── utils.py
-│   ├── vectorstore/
-│   └── data/
-│
-├── screenshots/
-│
-├── README.md
-└── .gitignore
-```
-
----
-
-# 🔮 Future Improvements
-
-* LangGraph workflow orchestration
-* OCR support for scanned PDFs
-* Hybrid BM25 retrieval
-* Multi-session chat memory
-* Advanced reranking models
-* Web search augmentation
-* Authentication system
-* Cloud deployment
-* PDF text highlighting
-* Agentic workflows
-
----
-
-# 🎯 Project Goals
-
-This project explores:
-
-* Retrieval-Augmented Generation (RAG)
-* Document intelligence systems
-* Persistent vector databases
-* AI retrieval engineering
-* Source-grounded AI responses
-* Interactive AI document workflows
-
----
-
----
-
-# 🙌 Acknowledgements
-
-Built using:
-
-* LangChain
-* FastAPI
-* React
-* Ollama
-* FAISS
-* TailwindCSS
-* Gemini API
+.env.example       # Environment variable template
+Key Engineering Decisions
+Dynamic retrieval depth — Short queries retrieve 2 chunks, medium 4, long 6
+Keyword reranking — Boosts chunks with query term overlap for better relevance
+Strict context adherence — Prompt explicitly forbids hallucination; answers must come from retrieved context
+Stateless backend — No shared chat history between users; clean per-request architecture
+Source deduplication — Multiple chunks from the same page are merged into a single citation card
+API Endpoints
+Table
+Endpoint	Method	Description
+/upload	POST	Upload a PDF, extract text, chunk and index
+/chat	POST	Stream AI response with source grounding
+/reset	POST	Clear all documents and vector store
+/health	GET	Check backend, Ollama, and vector store status
+Future Roadmap
+[ ] Multi-session chat memory
+[ ] Hybrid BM25 + semantic search
+[ ] Cross-encoder reranking
+[ ] Docker deployment
+[ ] OCR for scanned PDFs
