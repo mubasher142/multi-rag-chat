@@ -1,19 +1,20 @@
+const API_BASE = (window as any).__API_URL__ || 'http://localhost:8000';
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  FileText, 
-  Send, 
-  Plus, 
-  Trash2, 
-  Loader2, 
-  MessageSquare, 
+import {
+  FileText,
+  Send,
+  Plus,
+  Trash2,
+  Loader2,
+  MessageSquare,
   Zap,
   FileCheck,
   X,
   Menu
 } from 'lucide-react';
 import { cn } from './lib/utils';
-import { extractTextFromPdf } from './lib/pdf-processor';
+
 import ReactMarkdown from 'react-markdown';
 
 interface Message {
@@ -21,10 +22,10 @@ interface Message {
   role: 'user' | 'model';
   text: string;
   sources?: {
-  fileName: string;
-  pageNumber: number;
-  preview?: string;
-}[];
+    fileName: string;
+    pageNumber: number;
+    preview?: string;
+  }[];
 }
 
 interface UploadedFile {
@@ -40,13 +41,12 @@ export default function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [processedChunkCount, setProcessedChunkCount] = useState(0);
-  const [selectedModel, setSelectedModel] = useState<'gemini' | 'ollama'>('gemini');
-  const [previewPdf, setPreviewPdf] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState<'gemini' | 'ollama'>(() => (localStorage.getItem('mpc_model') as 'gemini' | 'ollama') || 'gemini'); const [previewPdf, setPreviewPdf] = useState<string | null>(null);
   const [previewPage, setPreviewPage] = useState<number>(1);
   const [showResyncWarning, setShowResyncWarning] = useState(false);
   const [showMobileSidebar, setShowMobileSidebar] = useState(false);
   const isLoadedRef = useRef(false);
-  
+
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -54,11 +54,13 @@ export default function App() {
   useEffect(() => {
     const savedMessages = localStorage.getItem('mpc_messages');
     const savedFiles = localStorage.getItem('mpc_uploaded_files');
-    const savedVectors = localStorage.getItem('mpc_vector_store');
+
+    let loadedMessages: Message[] = [];
+    let loadedFiles: UploadedFile[] = [];
 
     if (savedMessages) {
       try {
-        setMessages(JSON.parse(savedMessages));
+        loadedMessages = JSON.parse(savedMessages);
       } catch (e) {
         console.error('Failed to load messages', e);
       }
@@ -66,20 +68,43 @@ export default function App() {
 
     if (savedFiles) {
       try {
-        const files = JSON.parse(savedFiles);
-        setUploadedFiles(files);
-        setProcessedChunkCount(files.reduce((acc: number, f: any) => acc + (f.chunkCount || 0), 0));
-        // Note: In this architecture, vectors are on the server.
-        // If the server restarts, documents would need re-uploading unless persisted in a real DB.
+        loadedFiles = JSON.parse(savedFiles);
       } catch (e) {
         console.error('Failed to load file metadata', e);
       }
     }
-    
+
+    // DEFENSIVE FIX: If no documents are loaded, old source cards are invalid.
+    // Strip them so we don't show ghost citations for missing PDFs.
+    if (loadedFiles.length === 0 && loadedMessages.length > 0) {
+      loadedMessages = loadedMessages.map(m => ({
+        ...m,
+        sources: undefined
+      }));
+    }
+
+    setMessages(loadedMessages);
+    setUploadedFiles(loadedFiles);
+    setProcessedChunkCount(
+      loadedFiles.reduce((acc: number, f: any) => acc + (f.chunkCount || 0), 0)
+    );
+
     isLoadedRef.current = true;
   }, []);
+  // Strip sources from chat history when documents are removed
+  useEffect(() => {
+    if (!isLoadedRef.current) return;
+    if (uploadedFiles.length === 0) {
+      setMessages(prev =>
+        prev.map(m => ({ ...m, sources: undefined }))
+      );
+    }
+  }, [uploadedFiles.length]);
 
   // Persist to localStorage
+  useEffect(() => {
+    localStorage.setItem('mpc_model', selectedModel);
+  }, [selectedModel]);
   useEffect(() => {
     if (!isLoadedRef.current) return;
     localStorage.setItem('mpc_messages', JSON.stringify(messages));
@@ -95,219 +120,251 @@ export default function App() {
       chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
     }
   }, [messages, isGenerating]);
+  // Check backend health on mount
+  useEffect(() => {
+    fetch(`${API_BASE}/health`)
+      .then(r => r.json())
+      .then(data => {
+        if (!data.vectors_ready) {
+          // Backend has no vectors — frontend localStorage is stale
+          setUploadedFiles([]);
+          setProcessedChunkCount(0);
+          setMessages(prev => prev.map(m => ({ ...m, sources: undefined })));
+          localStorage.removeItem('mpc_uploaded_files');
+          setShowResyncWarning(true);
+        }
+      })
+      .catch(() => {
+        // Backend is completely down
+        setShowResyncWarning(true);
+      });
+  }, []);
 
   // const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
   //   const files = event.target.files;
   //   if (!files || files.length === 0) return;
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-  const files = event.target.files;
-  if (!files || files.length === 0) return;
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
 
-  const file = files[0];
+    const file = files[0];
+    setIsProcessing(true);
 
-  try {
-    // Step 1: show processing state in UI
-    const tempFile: UploadedFile = {
-      name: file.name,
-      status: 'processing',
-      chunkCount: 0
-    };
-    setUploadedFiles(prev => [...prev, tempFile]);
+    try {
+      // Step 1: show processing state in UI
+      const tempFile: UploadedFile = {
+        name: file.name,
+        status: 'processing',
+        chunkCount: 0
+      };
+      setUploadedFiles(prev => [...prev, tempFile]);
 
-    // Step 2: send to backend
-    const formData = new FormData();
-    formData.append("file", file);
+      // Step 2: send to backend
+      const formData = new FormData();
+      formData.append("file", file);
 
-    const response = await fetch("http://localhost:8000/upload", {
-      method: "POST",
-      body: formData,
-    });
+      const response = await fetch(`${API_BASE}/upload`, {
+        method: "POST",
+        body: formData,
+      });
 
-    const data = await response.json();
+      const data = await response.json();
 
-    console.log("Upload response:", data);
+      console.log("Upload response:", data);
 
-    // Step 3: update UI with REAL data
-    const uploadingIndex = uploadedFiles.length;
-    setUploadedFiles(prev => {
-      const updated = [...prev];
-      if (updated.length > 0) {
-        updated[updated.length - 1] = {
-          ...updated[updated.length - 1],
-          status: 'ready',
-          chunkCount: data.chunks
-        };
+      // Step 3: update UI with REAL data
+      setUploadedFiles(prev => {
+        const updated = [...prev];
+        if (updated.length > 0) {
+          updated[updated.length - 1] = {
+            ...updated[updated.length - 1],
+            status: 'ready',
+            chunkCount: data.chunks
+          };
+        }
+        return updated;
       }
-      return updated;
+      );
+
+      // Step 4: update total vectors
+      setProcessedChunkCount(prev => prev + data.chunks);
+      setShowResyncWarning(false);
+    } catch (error: any) {
+      console.error("Upload failed:", error);
+
+      // Show actual error message
+      const errorMsg = error.message || "Upload failed";
+      alert(errorMsg); // Or use a toast/snackbar if you prefer
+
+      setUploadedFiles(prev =>
+        prev.map(f =>
+          f.name === file.name ? { ...f, status: 'error' as const } : f
+        )
+      );
     }
-    );
+    finally {
+      setIsProcessing(false);
+    }
 
-    // Step 4: update total vectors
-    setProcessedChunkCount(prev => prev + data.chunks);
 
-  } catch (error) {
-    console.error("Upload failed:", error);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
 
-    // mark error in UI
-    
-    setUploadedFiles(prev =>
-      prev.map(f =>
-        f.name === file.name
-          ? { ...f, status: 'error' }
-          : f
-      )
-    );
-  }
-
-  if (fileInputRef.current) fileInputRef.current.value = '';
-};
-
-    // NOTE: This now assumes your FastAPI backend handles ingestion.
-    // In a production setup, you would have a POST /upload endpoint here.
-    // For now, we'll mark them as ready so the UI allows chatting.
+  // NOTE: This now assumes your FastAPI backend handles ingestion.
+  // In a production setup, you would have a POST /upload endpoint here.
+  // For now, we'll mark them as ready so the UI allows chatting.
   //   const newFiles: UploadedFile[] = Array.from(files).map(f => ({ 
   //     name: f.name, 
   //     status: 'ready',
   //     chunkCount: 0 
   //   }));
   //   setUploadedFiles(prev => [...prev, ...newFiles]);
-    
+
   //   if (fileInputRef.current) fileInputRef.current.value = '';
   // };
-console.log("SELECTED MODEL:", selectedModel);
+  console.log("SELECTED MODEL:", selectedModel);
 
-// const modelToSend = selectedModel.includes("Ollama") ? "ollama" : "gemini";
+  // const modelToSend = selectedModel.includes("Ollama") ? "ollama" : "gemini";
 
-// console.log("MODEL SENT TO BACKEND:", modelToSend);
+  // console.log("MODEL SENT TO BACKEND:", modelToSend);
 
-const handleSendMessage = async (e?: React.FormEvent) => {
-  e?.preventDefault();
-  if (!input.trim() || isGenerating) return;
+  const handleSendMessage = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!input.trim() || isGenerating) return;
 
-  const userMessage: Message = {
-    id: Date.now().toString(),
-    role: 'user',
-    text: input.trim()
-  };
-
-  setMessages(prev => [...prev, userMessage]);
-  setInput('');
-  setIsGenerating(true);
-
-
-
-  try {
-    const response = await fetch('http://localhost:8000/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        question: userMessage.text,
-        model: selectedModel
-        // .includes("Ollama") ? "ollama" : "gemini"
-      })
-    });
-
-    if (!response.ok || !response.body) {
-      throw new Error(`API error: ${response.status}`);
-    }
-
-    // 🔥 Create empty assistant message first
-    const assistantMessage: Message = {
-      id: (Date.now() + 1).toString(),
-      role: 'model',
-      text: ""
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      role: 'user',
+      text: input.trim()
     };
 
-    setMessages(prev => [...prev, assistantMessage]);
+    setMessages(prev => [...prev, userMessage]);
+    setInput('');
+    setIsGenerating(true);
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder("utf-8");
 
-    let fullText = "";
 
-    // 🔥 STREAM LOOP
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    try {
+      const response = await fetch(`${API_BASE}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: userMessage.text,
+          model: selectedModel
+          // .includes("Ollama") ? "ollama" : "gemini"
+        })
+      });
 
-      const chunk = decoder.decode(value);
-      fullText += chunk;
+      if (!response.ok || !response.body) {
+        throw new Error(`API error: ${response.status}`);
+      }
 
-      // 🔥 Update message live
-      setMessages(prev =>
-        prev.map(msg =>
-          msg.id === assistantMessage.id
-            ? { ...msg, text: fullText }
-            : msg
-        )
-      );
-    }
+      // 🔥 Create empty assistant message first
+      const assistantMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'model',
+        text: ""
+      };
+
+      setMessages(prev => [...prev, assistantMessage]);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+
+      let fullText = "";
+
+      // 🔥 STREAM LOOP
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        fullText += chunk;
+
+        // 🔥 Update message live
+        setMessages(prev =>
+          prev.map(msg =>
+            msg.id === assistantMessage.id
+              ? { ...msg, text: fullText }
+              : msg
+          )
+        );
+      }
       const parts = fullText.split("[SOURCES]");
 
-      const cleanText = parts[0]?.trim() || "";
+      let cleanText = parts[0]?.trim() || "";
       const parsedSources = parts[1]
         ? JSON.parse(parts[1])
         : [];
 
-          setMessages(prev =>
-    prev.map(msg =>
-      msg.id === assistantMessage.id
-        ? {
-            ...msg,
-            text: cleanText,
-            sources: parsedSources
-          }
-        : msg
-    )
-  );
-
-
-} catch (error) {
-  console.error('Chat API error:', error);
-
-  setMessages(prev => {
-    // 🔥 Try to find empty assistant message (created for streaming)
-    const hasEmpty = prev.some(msg => msg.role === 'model' && msg.text === "");
-
-    if (hasEmpty) {
-      // ✅ Update existing empty message
-      return prev.map(msg =>
-        msg.role === 'model' && msg.text === ""
-          ? {
-              ...msg,
-              text: "Error: Model failed (Gemini quota exceeded or backend issue). Try switching to Ollama."
-            }
-          : msg
-      );
-    }
-
-    // ✅ Otherwise add new message (fallback)
-    return [
-      ...prev,
-      {
-        id: (Date.now() + 1).toString(),
-        role: 'model',
-        text: "Error: Model failed (Gemini quota exceeded or backend issue). Try switching to Ollama."
+      // Strip surrounding quotes if the LLM wrapped the exact phrase
+      if (cleanText.startsWith('"') && cleanText.endsWith('"')) {
+        cleanText = cleanText.slice(1, -1);
       }
-    ];
-  });
-} finally {
-    setIsGenerating(false);
-  }
-};
+
+      // If the LLM couldn't find the answer, don't show misleading source cards
+      const isNotFound = cleanText.includes("Answer not found in the document");
+      const finalSources = isNotFound ? [] : parsedSources;
+
+      setMessages(prev =>
+        prev.map(msg =>
+          msg.id === assistantMessage.id
+            ? {
+              ...msg,
+              text: cleanText,
+              sources: finalSources
+            }
+            : msg
+        )
+      );
+
+
+    } catch (error) {
+      console.error('Chat API error:', error);
+
+      setMessages(prev => {
+        // 🔥 Try to find empty assistant message (created for streaming)
+        const hasEmpty = prev.some(msg => msg.role === 'model' && msg.text === "");
+
+        if (hasEmpty) {
+          // ✅ Update existing empty message
+          return prev.map(msg =>
+            msg.role === 'model' && msg.text === ""
+              ? {
+                ...msg,
+                text: "Error: Model failed (Gemini quota exceeded or backend issue). Try switching to Ollama."
+              }
+              : msg
+          );
+        }
+
+        // ✅ Otherwise add new message (fallback)
+        return [
+          ...prev,
+          {
+            id: (Date.now() + 1).toString(),
+            role: 'model',
+            text: "Error: Model failed (Gemini quota exceeded or backend issue). Try switching to Ollama."
+          }
+        ];
+      });
+    } finally {
+      setIsGenerating(false);
+      setIsProcessing(false);
+    }
+  };
 
   const clearDocs = async () => {
     // clear frontend
     setUploadedFiles([]);
     setProcessedChunkCount(0);
     setMessages([]);
+    setShowResyncWarning(false);
 
     localStorage.removeItem('mpc_messages');
     localStorage.removeItem('mpc_uploaded_files');
     localStorage.removeItem('mpc_vector_store');
-
-    setShowResyncWarning(false);
-    await fetch("http://localhost:8000/reset", {
+    await fetch(`${API_BASE}/reset`, {
       method: "POST"
     });
     setShowResyncWarning(true);
@@ -319,7 +376,7 @@ const handleSendMessage = async (e?: React.FormEvent) => {
       {/* Top Navigation Bar */}
       <nav className="h-16 border-b border-white/5 flex items-center justify-between px-4 sm:px-6 bg-[#0f0f12] shrink-0 z-30">
         <div className="flex items-center gap-3">
-          <button 
+          <button
             onClick={() => setShowMobileSidebar(!showMobileSidebar)}
             className="lg:hidden cursor-pointer p-2 hover:bg-white/5 rounded-lg text-slate-400"
           >
@@ -336,10 +393,10 @@ const handleSendMessage = async (e?: React.FormEvent) => {
               "w-2 h-2 rounded-full",
               processedChunkCount > 0 ? "bg-emerald-500 animate-pulse" : "bg-slate-600"
             )}></span>
-             {processedChunkCount > 0 ? "Vector Engine Active" : "Engine Idle"}
+            {processedChunkCount > 0 ? "Vector Engine Active" : "Engine Idle"}
           </div>
           <div className="hidden sm:block h-4 w-px bg-white/10"></div>
-          <button 
+          <button
             onClick={() => fileInputRef.current?.click()}
             disabled={isProcessing}
             // disabled={!input.trim() || isGenerating}
@@ -349,13 +406,12 @@ const handleSendMessage = async (e?: React.FormEvent) => {
             <span className="hidden xs:inline">Upload PDF</span>
             <span className="xs:hidden">Add</span>
           </button>
-          <input 
-            type="file" 
-            ref={fileInputRef} 
-            onChange={handleFileUpload} 
-            multiple 
-            accept=".pdf" 
-            className="hidden" 
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileUpload}
+            accept=".pdf"
+            className="hidden"
           />
         </div>
       </nav>
@@ -365,7 +421,7 @@ const handleSendMessage = async (e?: React.FormEvent) => {
         <AnimatePresence>
           {showMobileSidebar && (
             <>
-              <motion.div 
+              <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
@@ -384,14 +440,14 @@ const handleSendMessage = async (e?: React.FormEvent) => {
                     <Zap className="w-4 h-4 text-indigo-400" />
                     <h2 className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">Knowledge Base</h2>
                   </div>
-                  <button 
+                  <button
                     onClick={() => setShowMobileSidebar(false)}
                     className="cursor-pointer p-2 hover:bg-white/5 rounded-full text-slate-500 hover:text-white transition-all active:scale-90"
                   >
                     <X className="w-5 h-5" />
                   </button>
                 </div>
-                <SidebarContent 
+                <SidebarContent
                   uploadedFiles={uploadedFiles}
                   processedChunkCount={processedChunkCount}
                   showResyncWarning={showResyncWarning}
@@ -407,7 +463,7 @@ const handleSendMessage = async (e?: React.FormEvent) => {
           <div className="p-5 border-b border-white/5">
             <h2 className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 font-sans">Knowledge Base</h2>
           </div>
-          <SidebarContent 
+          <SidebarContent
             uploadedFiles={uploadedFiles}
             processedChunkCount={processedChunkCount}
             showResyncWarning={showResyncWarning}
@@ -417,14 +473,14 @@ const handleSendMessage = async (e?: React.FormEvent) => {
 
         {/* Main Content Area: Chat */}
         <main className="flex-1 flex flex-col bg-[#0a0a0c] relative">
-          <div 
+          <div
             ref={chatContainerRef}
             className="flex-1 overflow-y-auto p-4 sm:p-8 space-y-8 scroll-smooth"
           >
             {messages.length === 0 ? (
               <>
                 <div className="flex items-center gap-2 mb-4 bg-slate-900/50 p-1 rounded-xl w-fit">
-                  <button 
+                  <button
                     onClick={() => setSelectedModel('gemini')}
                     className={cn(
                       "px-4 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer",
@@ -433,7 +489,7 @@ const handleSendMessage = async (e?: React.FormEvent) => {
                   >
                     Gemini (Cloud)
                   </button>
-                  <button 
+                  <button
                     onClick={() => setSelectedModel('ollama')}
                     className={cn(
                       "px-4 py-1.5 rounded-lg text-xs font-medium transition-all font-mono cursor-pointer",
@@ -445,10 +501,10 @@ const handleSendMessage = async (e?: React.FormEvent) => {
                 </div>
                 <div className="h-full flex flex-col items-center justify-center max-w-sm mx-auto text-center space-y-10">
                   <div className="relative">
-                     <div className="absolute inset-0 bg-indigo-600/20 blur-3xl rounded-full"></div>
-                     <div className="relative w-20 h-20 bg-indigo-600/10 rounded-3xl flex items-center justify-center text-indigo-500 border border-indigo-500/20 shadow-2xl">
-                       <MessageSquare className="w-10 h-10" />
-                     </div>
+                    <div className="absolute inset-0 bg-indigo-600/20 blur-3xl rounded-full"></div>
+                    <div className="relative w-20 h-20 bg-indigo-600/10 rounded-3xl flex items-center justify-center text-indigo-500 border border-indigo-500/20 shadow-2xl">
+                      <MessageSquare className="w-10 h-10" />
+                    </div>
                   </div>
                   <div>
                     <h3 className="text-2xl font-semibold text-white mb-3 tracking-tight font-sans">Intelligent RAG Assistant</h3>
@@ -476,18 +532,18 @@ const handleSendMessage = async (e?: React.FormEvent) => {
                     )}>
                       {msg.role === 'user' ? <div className="text-[10px] font-bold text-slate-400">ME</div> : <Zap className="w-4 h-4 sm:w-5 sm:h-5 text-indigo-400" />}
                     </div>
-                    
+
                     <div className={cn(
                       "flex flex-col gap-3",
                       msg.role === 'user' ? "max-w-[85%] sm:max-w-[75%]" : "max-w-[90%] sm:max-w-[85%]"
                     )}>
                       <div className={cn(
                         "rounded-2xl px-4 sm:px-6 py-3 sm:py-4 text-sm leading-relaxed shadow-2xl",
-                        msg.role === 'user' 
-                          ? "bg-indigo-600 text-white rounded-tr-none" 
+                        msg.role === 'user'
+                          ? "bg-indigo-600 text-white rounded-tr-none"
                           : "bg-white/5 border border-white/10 text-slate-300 rounded-tl-none"
                       )}>
-                        {msg.role === 'model' && (
+                        {msg.role === 'model' && msg.sources && msg.sources.length > 0 && (
                           <div className="flex items-center gap-2 mb-3 sm:mb-4">
                             <span className="text-[9px] px-2.5 py-0.5 bg-indigo-500/20 text-indigo-300 rounded border border-indigo-500/30 font-bold uppercase tracking-widest font-sans">Source Analysis</span>
                           </div>
@@ -504,28 +560,28 @@ const handleSendMessage = async (e?: React.FormEvent) => {
                       {msg.sources && msg.sources.length > 0 && (
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                           {msg.sources.map((src, i) => (
-                              <button
-                                key={i}
-                                onClick={() => {
-                                  setPreviewPdf(src.fileName);
-                                  setPreviewPage(src.pageNumber);
-                                }}
-                                className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl px-3 py-2 flex items-center gap-3 hover:bg-indigo-500/20 transition-all text-left"
-                              >
-                            <div className="w-8 h-8 rounded-lg bg-indigo-600/20 flex items-center justify-center">
-                              <FileText className="w-4 h-4 text-indigo-400" />
-                            </div>
+                            <button
+                              key={i}
+                              onClick={() => {
+                                setPreviewPdf(src.fileName);
+                                setPreviewPage(src.pageNumber);
+                              }}
+                              className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl px-3 py-2 flex items-center gap-3 hover:bg-indigo-500/20 transition-all text-left"
+                            >
+                              <div className="w-8 h-8 rounded-lg bg-indigo-600/20 flex items-center justify-center">
+                                <FileText className="w-4 h-4 text-indigo-400" />
+                              </div>
 
-                            <div className="flex flex-col min-w-0">
-                              <span className="text-xs text-white truncate font-medium">
-                                {src.fileName}
-                              </span>
+                              <div className="flex flex-col min-w-0">
+                                <span className="text-xs text-white truncate font-medium">
+                                  {src.fileName}
+                                </span>
 
-                              <span className="text-[10px] text-indigo-300">
-                                Page {src.pageNumber}
-                              </span>
-                            </div>
-                          </button>
+                                <span className="text-[10px] text-indigo-300">
+                                  Page {src.pageNumber}
+                                </span>
+                              </div>
+                            </button>
                           ))}
                         </div>
                       )}
@@ -535,63 +591,63 @@ const handleSendMessage = async (e?: React.FormEvent) => {
               </div>
             )}
             {previewPdf && (
-  <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+              <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
 
-    <div className="bg-zinc-900 w-[90%] h-[90%] rounded-2xl p-4 relative flex flex-col">
+                <div className="bg-zinc-900 w-[90%] h-[90%] rounded-2xl p-4 relative flex flex-col">
 
-      <button
-        onClick={() => setPreviewPdf(null)}
-        className="absolute top-4 right-4 bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded-lg"
-      >
-        Close
-      </button>
+                  <button
+                    onClick={() => setPreviewPdf(null)}
+                    className="absolute top-4 right-4 bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded-lg"
+                  >
+                    Close
+                  </button>
 
-            <div className="mb-4 p-4 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-sm text-slate-300 overflow-y-auto max-h-32">
-        <div className="text-xs uppercase tracking-wider text-indigo-300 mb-2 font-bold">
-          Relevant Passage
-        </div>
+                  <div className="mb-4 p-4 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-sm text-slate-300 overflow-y-auto max-h-32">
+                    <div className="text-xs uppercase tracking-wider text-indigo-300 mb-2 font-bold">
+                      Relevant Passage
+                    </div>
 
-        {
-          messages
-            .flatMap(m => m.sources || [])
-            .find(
-              s =>
-                s.fileName === previewPdf &&
-                s.pageNumber === previewPage
-            )?.preview
-        }
-      </div>
+                    {
+                      messages
+                        .flatMap(m => m.sources || [])
+                        .find(
+                          s =>
+                            s.fileName === previewPdf &&
+                            s.pageNumber === previewPage
+                        )?.preview
+                    }
+                  </div>
 
-      <iframe
-        src={`http://localhost:8000/pdfs/${previewPdf}#page=${previewPage}`}
-        className="w-full h-full rounded-xl"
-      />
+                  <iframe
+                    src={`${API_BASE}/pdfs/${previewPdf}#page=${previewPage}`}
+                    className="w-full h-full rounded-xl"
+                  />
 
-    </div>
+                </div>
 
-  </div>
-)}
+              </div>
+            )}
           </div>
-          
+
 
 
           {/* Floating Input Bar */}
           <div className="p-4 sm:p-8 absolute bottom-0 left-0 right-0 max-w-3xl mx-auto w-full z-20">
             <div className="bg-[#0f0f12]/90 backdrop-blur-2xl border border-white/10 rounded-2xl p-2 shadow-[0_20px_50px_rgba(0,0,0,0.5)] focus-within:border-indigo-500/50 transition-all duration-300">
-              <form 
+              <form
                 onSubmit={handleSendMessage}
                 className="flex items-center gap-2"
               >
                 <input
                   type="text"
                   value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder={
-                uploadedFiles.length > 0
-                  ? "Ask about your documents..."
-                  : "Ask anything or upload PDFs..."
-              }
-              disabled={isGenerating}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder={
+                    uploadedFiles.length > 0
+                      ? "Ask about your documents..."
+                      : "Ask anything or upload PDFs..."
+                  }
+                  disabled={isGenerating}
                   className="flex-1 px-4 sm:px-5 py-3 sm:py-3.5 bg-transparent border-none focus:outline-none text-sm text-white placeholder:text-slate-600 font-sans"
                 />
                 <div className="flex items-center gap-1 sm:gap-2 px-1 sm:px-2">
@@ -607,7 +663,7 @@ const handleSendMessage = async (e?: React.FormEvent) => {
               </form>
             </div>
             <p className="mt-4 text-center text-[9px] sm:text-[10px] text-slate-600 font-bold uppercase tracking-[0.2em] font-sans">
-              Powered by Gemini 3 Flash • Secure RAG Engine
+              Powered by Gemini 2.0 Flash • Secure RAG Engine
             </p>
           </div>
         </main>
@@ -616,22 +672,22 @@ const handleSendMessage = async (e?: React.FormEvent) => {
   );
 }
 
-function SidebarContent({ 
-  uploadedFiles, 
-  processedChunkCount, 
-  showResyncWarning, 
-  clearDocs 
-}: { 
-  uploadedFiles: UploadedFile[], 
-  processedChunkCount: number, 
-  showResyncWarning: boolean, 
-  clearDocs: () => void 
+function SidebarContent({
+  uploadedFiles,
+  processedChunkCount,
+  showResyncWarning,
+  clearDocs
+}: {
+  uploadedFiles: UploadedFile[],
+  processedChunkCount: number,
+  showResyncWarning: boolean,
+  clearDocs: () => void
 }) {
   return (
     <>
       <div className="p-5 flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide">
         {showResyncWarning && uploadedFiles.length > 0 && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
             className="mb-6 p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200"
@@ -657,11 +713,11 @@ function SidebarContent({
               >
                 <div className={cn(
                   "w-8 h-10 flex items-center justify-center rounded border shrink-0",
-                  file.status === 'ready' ? "bg-indigo-900/20 border-indigo-500/20" : 
-                  file.status === 'processing' ? "bg-blue-900/20 border-blue-500/20" : "bg-red-900/20 border-red-500/20"
+                  file.status === 'ready' ? "bg-indigo-900/20 border-indigo-500/20" :
+                    file.status === 'processing' ? "bg-blue-900/20 border-blue-500/20" : "bg-red-900/20 border-red-500/20"
                 )}>
-                  {file.status === 'processing' ? 
-                    <Loader2 className="w-4 h-4 text-blue-400 animate-spin" /> : 
+                  {file.status === 'processing' ?
+                    <Loader2 className="w-4 h-4 text-blue-400 animate-spin" /> :
                     <span className={cn(
                       "text-[9px] font-bold",
                       file.status === 'ready' ? "text-indigo-400" : "text-red-400"
@@ -671,8 +727,8 @@ function SidebarContent({
                 <div className="overflow-hidden">
                   <p className="text-sm text-white truncate font-medium">{file.name}</p>
                   <p className="text-[10px] text-slate-500">
-                    {file.status === 'ready' ? `${file.chunkCount || 0} chunks indexed` : 
-                     file.status === 'processing' ? 'Processing...' : 'Indexing error'}
+                    {file.status === 'ready' ? `${file.chunkCount || 0} chunks indexed` :
+                      file.status === 'processing' ? 'Processing...' : 'Indexing error'}
                   </p>
                 </div>
               </motion.div>
@@ -695,7 +751,7 @@ function SidebarContent({
       <div className="p-5 border-t border-white/5 bg-[#0a0a0c]">
         <div className="flex items-center justify-between mb-4">
           <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest font-sans">Storage Status</span>
-          <button 
+          <button
             onClick={() => clearDocs()}
             className="cursor-pointer text-slate-600 hover:text-red-400 transition-colors"
             title="Clear library"
@@ -709,7 +765,7 @@ function SidebarContent({
             <span className="text-[10px] text-slate-500 font-bold tracking-tighter">TOTAL VECTORS</span>
           </div>
           <div className="w-full h-1 bg-white/5 rounded-full overflow-hidden shadow-inner">
-            <motion.div 
+            <motion.div
               initial={{ width: 0 }}
               animate={{ width: `${Math.min((processedChunkCount / 5000) * 100, 100)}%` }}
               className="h-full bg-indigo-500 shadow-[0_0_12px_rgba(99,102,241,0.6)]"
@@ -717,7 +773,7 @@ function SidebarContent({
           </div>
         </div>
 
-        
+
       </div>
     </>
   );

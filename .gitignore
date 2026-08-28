@@ -1,20 +1,28 @@
 # Python
-backend/venv/
+# Python
+venv/
 __pycache__/
 *.pyc
-
-# Vector store
-backend/vectorstore/
+*.pyo
+*.pyd
+.Python
+*.so
+.env
+.env.local
 
 # Node
-frontend/node_modules/
-
-# Env
-.env
-
-# Build
+node_modules/
 dist/
-build/
+*.log
+
+# Project data
+data/
+vectorstore/
+
+# IDE
+.vscode/
+.idea/
+*.swp
 
 # OS
 .DS_Store

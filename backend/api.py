@@ -1,10 +1,9 @@
 from fastapi.staticfiles import StaticFiles
-from multiprocessing import context
 from fastapi import FastAPI
-from ollama import generate
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import UploadFile, File
+from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from langchain_ollama import OllamaLLM 
 from pypdf import PdfReader
@@ -13,57 +12,69 @@ import shutil
 import os
 import json
 
-
-# import io
-
+# Global state
 uploaded_docs_count = 0
 all_documents = []
+vector_store = None
 
 from utils import (
     get_pdf_documents,
     get_text_chunks,
     get_vector_store,
-    chat_with_pdf,
-    chat_with_gemini
+    client,  # Gemini client
 )
 
 # -----------------------------
 # App init
 # -----------------------------
 app = FastAPI()
-
+os.makedirs("data", exist_ok=True)
 app.mount("/pdfs", StaticFiles(directory="data"), name="pdfs")
-
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # allow frontend
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# -----------------------------
+# Upload endpoint
+# -----------------------------
 
 @app.post("/upload")
 def upload_pdf(file: UploadFile = File(...)):
-    global vector_store, uploaded_docs_count
+    global vector_store, uploaded_docs_count, all_documents
 
-    # pdf_reader = PdfReader(file.file)
-    # 🔥 Save uploaded PDF physically
-# 🔥 Save uploaded PDF physically
+    # Validate filename
+    if not file.filename or not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+
     os.makedirs("data", exist_ok=True)
-
     file_path = os.path.join("data", file.filename)
 
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    # Ensure stream is at beginning, then save
+    try:
+        file.file.seek(0)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
 
-    # 🔥 Read saved PDF
-    pdf_reader = PdfReader(file_path)
+    # Validate file actually has content
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    # Validate it's a readable PDF
+    try:
+        pdf_reader = PdfReader(file_path)
+    except Exception as e:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(status_code=400, detail=f"Invalid or corrupted PDF: {str(e)}")
 
     documents = []
-    
-
     for i, page in enumerate(pdf_reader.pages):
         text = page.extract_text()
         if text:
@@ -73,10 +84,11 @@ def upload_pdf(file: UploadFile = File(...)):
                     metadata={
                         "source": file.filename,
                         "page": i + 1,
-                         "section_hint": text[:80].lower()
+                        "section_hint": text[:80].lower()
                     }
                 )
             )
+
     print(f"Documents created: {len(documents)}")
 
     chunks = get_text_chunks(documents)
@@ -85,25 +97,22 @@ def upload_pdf(file: UploadFile = File(...)):
 
     if len(chunks) == 0:
         return {
-            "error": "No text extracted from PDF"
+            "filename": file.filename,
+            "chunks": 0,
+            "warning": "No text could be extracted. The PDF may be scanned/images-only."
         }
 
-
-    # 🔥 ALWAYS rebuild vector store from uploaded PDFs
-    # vector_store = get_vector_store(chunks)
     if vector_store is None:
         vector_store = get_vector_store(chunks)
     else:
-        # If vector store already exists, add new chunks to it
         vector_store.add_documents(chunks)
 
     uploaded_docs_count += len(chunks)
 
-
     return {
         "filename": file.filename,
         "chunks": len(chunks),
-        "message": "Vector store replaced successfully"
+        "message": "Vector store updated successfully"
     }
 
 # -----------------------------
@@ -111,16 +120,16 @@ def upload_pdf(file: UploadFile = File(...)):
 # -----------------------------
 print("Loading vector store...")
 
-documents = get_pdf_documents("data")
+if os.path.exists("data"):
+    documents = get_pdf_documents("data")
+else:
+    documents = []
+    print("No data folder found, starting with empty vector store.")
+
 chunks = get_text_chunks(documents)
 vector_store = get_vector_store(chunks)
 
 print("System ready!")
-
-# -----------------------------
-# Memory
-# -----------------------------
-chat_history = []
 
 # -----------------------------
 # Request schema
@@ -130,77 +139,34 @@ class Query(BaseModel):
     model: str  # "ollama" or "gemini"
 
 # -----------------------------
-# API endpoint
+# Chat endpoint
 # -----------------------------
-
 @app.post("/chat")
 def chat(query: Query):
-    global vector_store, chat_history
+    global vector_store
+
     def generate():
-
-        question = query.question.lower()
-
-        # 🔥 Simple query detection
-        simple_keywords = [
-            "hi", "hello", "hey",
-            "what is", "who is",
-            "define", "meaning",
-            "explain briefly"
-        ]
-
-        is_simple = any(word in question for word in simple_keywords)
-
-        # has_docs = vector_store is not None and len(vector_store.index_to_docstore_id) > 0 and query.question.strip() != ""
-        # has_docs = uploaded_docs_count > 0
         has_docs = (
             vector_store is not None
             and len(vector_store.index_to_docstore_id) > 0
         )
 
-        # 🔍 If no documents → normal chat
         if not has_docs:
-            print("No documents → normal chat mode")
-
+            # Normal chat — NO sources yielded
             llm = OllamaLLM(model="phi3", temperature=0)
-
-            normal_prompt = f"""
-        You are a helpful AI assistant.
-
+            normal_prompt = f"""You are a helpful AI assistant.
         Answer the question normally and clearly.
-
-        Question:
-        {query.question}
-
-        Answer:
-        """
-
-            full_answer = ""
-
+        Question: {query.question}
+        Answer:"""
             for chunk in llm.stream(normal_prompt):
-                text_chunk = str(chunk)
-                full_answer += text_chunk
-                yield text_chunk.encode("utf-8")
-
-            chat_history.append((query.question, full_answer))
+                yield str(chunk).encode("utf-8")
             return
-
-        # 🔍 Retrieve context
-        docs_with_scores = vector_store.similarity_search_with_score(
-            query.question,
-            k=4
-        )
-
-        # lower score = more relevant
-        # 🔥 Dynamic retrieval depth
-
+        # Dynamic retrieval depth
         word_count = len(query.question.split())
-
         if word_count <= 4:
             retrieval_k = 2
-
         elif word_count <= 10:
             retrieval_k = 4
-
         else:
             retrieval_k = 6
 
@@ -209,50 +175,27 @@ def chat(query: Query):
             k=retrieval_k
         )
 
-        # keep best 2 chunks
-        # 🔥 Keep only best chunks dynamically
-
         if retrieval_k <= 2:
             docs = [doc[0] for doc in docs_with_scores[:1]]
-
         elif retrieval_k <= 4:
             docs = [doc[0] for doc in docs_with_scores[:2]]
-
         else:
             docs = [doc[0] for doc in docs_with_scores[:3]]
 
-        filtered_docs = []
-
+        # Keyword reranking
         query_words = set(query.question.lower().split())
-
         reranked_docs = []
 
         for doc in docs:
-
             content_words = set(doc.page_content.lower().split())
-
-            # keyword overlap score
             overlap = len(query_words.intersection(content_words))
-
-            # chunk length bonus
             length_score = min(len(doc.page_content) / 500, 1)
-
-            # total rerank score
             rerank_score = overlap + length_score
-
             reranked_docs.append((doc, rerank_score))
 
-        # 🔥 Sort by rerank score descending
-        reranked_docs = sorted(
-            reranked_docs,
-            key=lambda x: x[1],
-            reverse=True
-        )
-
-        # keep best reranked chunks
+        reranked_docs.sort(key=lambda x: x[1], reverse=True)
         filtered_docs = [doc[0] for doc in reranked_docs[:2]]
 
-        # fallback if nothing matched
         if filtered_docs:
             docs = filtered_docs
 
@@ -264,22 +207,27 @@ def chat(query: Query):
             }
             for doc in docs
         ]
-        
+        seen = set()
+        unique_sources = []
+        for src in sources:
+            key = (src["fileName"], src["pageNumber"])
+            if key not in seen:
+                seen.add(key)
+                unique_sources.append(src)
+        sources = unique_sources
 
         context = "\n\n".join([doc.page_content[:400] for doc in docs])
+
 
         print("------ CONTEXT ------")
         print(context[:400])
         print("---------------------")
 
-        # 🔥 Strict prompt
-        prompt = f"""
-You are a strict document-based assistant.
+        prompt = f"""You are a strict document-based assistant.
 
 You MUST answer ONLY from the given context.
 DO NOT use outside knowledge.
 DO NOT include extra details.
-DO NOT summarize unrelated parts.
 DO NOT guess.
 
 If the answer is NOT present in the context, reply EXACTLY:
@@ -294,45 +242,75 @@ Question:
 Answer:
 """
 
-        full_answer = ""
+        # Route to correct model
+        if query.model == "gemini":
+            print("📄 RAG MODE (Gemini)")
+            try:
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=prompt
+                )
+                if hasattr(response, "text") and response.text:
+                    answer = response.text
+                else:
+                    try:
+                        answer = response.candidates[0].content.parts[0].text
+                    except:
+                        answer = "Sorry, I couldn't generate a response."
+            except Exception as e:
+                print(f"Gemini error: {e}")
+                answer = f"Error calling Gemini: {str(e)}"
 
-        # 🔥 ALWAYS use RAG when docs exist
-# 🔥 ALWAYS use RAG when docs exist
-        print("📄 RAG MODE (Ollama)")
+            # Yield in chunks so frontend streaming works consistently
+            for i in range(0, len(answer), 5):
+                yield answer[i:i+5].encode("utf-8")
 
-        llm = OllamaLLM(model="phi3", temperature=0)
-
-        for chunk in llm.stream(prompt):
-            text_chunk = str(chunk)
-            full_answer += text_chunk
-            yield text_chunk.encode("utf-8")
-
-        # ✅ Save memory
-        chat_history.append((query.question, full_answer))
-
-# 🔥 Send sources at end of stream
-        import json
+        else:
+            print("📄 RAG MODE (Ollama)")
+            llm = OllamaLLM(model="phi3", temperature=0)
+            for chunk in llm.stream(prompt):
+                yield str(chunk).encode("utf-8")
 
         yield "\n\n[SOURCES]\n" + json.dumps(sources)
 
     return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
 
+# -----------------------------
+# Reset endpoint
+# -----------------------------
 @app.post("/reset")
 def reset_vector_store():
-
-    global vector_store
+    global vector_store, uploaded_docs_count, all_documents
 
     vectorstore_path = "vectorstore"
 
-    # 🔥 clear RAM memory
     vector_store = None
+    uploaded_docs_count = 0
+    all_documents = []
 
-    # 🔥 delete saved FAISS files
     if os.path.exists(vectorstore_path):
         shutil.rmtree(vectorstore_path)
-
         print("Persistent vector store deleted ✅")
 
+    return {"message": "Vector store fully reset"}
+
+import requests
+
+@app.get("/health")
+def health_check():
+    # Check Ollama
+    ollama_status = "disconnected"
+    try:
+        response = requests.get("http://localhost:11434/api/tags", timeout=2)
+        if response.status_code == 200:
+            ollama_status = "connected"
+    except:
+        pass
+
     return {
-        "message": "Vector store fully reset"
+        "status": "ok",
+        "ollama": ollama_status,
+        "vector_store_active": vector_store is not None,
+        "documents_indexed": len(all_documents),
+        "chunks_indexed": uploaded_docs_count
     }

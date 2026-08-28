@@ -1,6 +1,0 @@
-{
-  "name": "Remix: MultiPDFChat",
-  "description": "Smart chatbot that allows users to ask questions across multiple PDF documents using Retrieval-Augmented Generation (RAG) and Gemini AI.",
-  "requestFramePermissions": [],
-  "majorCapabilities": []
-}
